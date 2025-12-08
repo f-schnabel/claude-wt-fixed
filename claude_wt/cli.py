@@ -235,7 +235,7 @@ This directory must be added to .gitignore to prevent committing worktree data.
     # Generate worktree branch name
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     suffix = name or timestamp
-    branch_name = f"claude-wt-{suffix}"
+    branch_name = f"cwt-{suffix}"
 
     # Create branch if needed
     try:
@@ -326,7 +326,7 @@ def resume(branch_name: str, dangerously_skip_permissions: bool = True):
         repo_root = Path(result.stdout.strip())
 
         # Find worktree path using git
-        full_branch_name = f"claude-wt-{branch_name}"
+        full_branch_name = f"cwt-{branch_name}"
         result = subprocess.run(
             ["git", "-C", str(repo_root), "worktree", "list", "--porcelain"],
             capture_output=True,
@@ -415,7 +415,7 @@ def clean(
 
         if branch_name:
             # Clean specific branch
-            full_branch_name = f"claude-wt-{branch_name}"
+            full_branch_name = f"cwt-{branch_name}"
             wt_path = wt_root / full_branch_name
 
             # Remove worktree
@@ -481,7 +481,7 @@ def clean(
                     # Remove claude-wt worktrees
                     for wt in worktrees:
                         branch_name = wt.get("branch", "")
-                        if branch_name.startswith("claude-wt-"):
+                        if branch_name.startswith("cwt-"):
                             try:
                                 subprocess.run(
                                     [
@@ -515,7 +515,7 @@ def clean(
                             str(repo_root),
                             "branch",
                             "--list",
-                            "claude-wt-*",
+                            "cwt-*",
                         ],
                         capture_output=True,
                         text=True,
@@ -549,7 +549,7 @@ def clean(
                                     f"  [red]❌ Failed to delete branch {branch}[/red]"
                                 )
                 except subprocess.CalledProcessError:
-                    console.print("  [yellow]No claude-wt-* branches found[/yellow]")
+                    console.print("  [yellow]No cwt-* branches found[/yellow]")
 
             console.print("[green bold]🧹 Cleanup complete![/green bold]")
 
@@ -598,7 +598,7 @@ def list():
 
         # Filter for claude-wt worktrees
         claude_worktrees = [
-            wt for wt in worktrees if wt.get("branch", "").startswith("claude-wt-")
+            wt for wt in worktrees if wt.get("branch", "").startswith("cwt-")
         ]
 
         if not claude_worktrees:
@@ -615,7 +615,7 @@ def list():
 
         for wt in sorted(claude_worktrees, key=lambda x: x.get("branch", "")):
             branch_name = wt.get("branch", "")
-            suffix = branch_name.replace("claude-wt-", "")
+            suffix = branch_name.replace("cwt-", "")
             wt_path = wt["path"]
 
             # Check if worktree path still exists
