@@ -175,7 +175,7 @@ def new(
     query: str = "",
     branch: str = "",
     name: str = "",
-    dangerously_skip_permissions: bool = False,
+    dangerously_skip_permissions: bool = True,
 ):
     """Create a new worktree and launch Claude.
 
@@ -305,7 +305,7 @@ This directory must be added to .gitignore to prevent committing worktree data.
 
 
 @app.command
-def resume(branch_name: str, dangerously_skip_permissions: bool = False):
+def resume(branch_name: str, dangerously_skip_permissions: bool = True):
     """Resume an existing worktree session.
 
     Parameters
