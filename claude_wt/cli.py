@@ -12,25 +12,161 @@ app = App(help="Claude worktree management CLI")
 console = Console()
 
 
+def get_remote_info(repo_root: Path, branch: str | None = None) -> tuple[str | None, bool]:
+    """Get the default remote and check if specified branch has upstream.
+    
+    Args:
+        repo_root: Repository root path
+        branch: Branch to check for upstream (uses current branch if None)
+    
+    Returns:
+        (remote_name, has_upstream): Remote name (or None) and whether branch tracks a remote
+    """
+    # Check if any remotes exist
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), "remote"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    
+    if result.returncode != 0 or not result.stdout.strip():
+        return None, False
+    
+    remotes = result.stdout.strip().split('\n')
+    
+    # Prefer 'origin' if it exists, otherwise use first remote
+    remote = 'origin' if 'origin' in remotes else remotes[0]
+    
+    # Check if specified branch (or current branch) has upstream
+    if branch:
+        # Check specific branch's upstream
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "config", f"branch.{branch}.remote"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    else:
+        # Check current branch's upstream
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    
+    has_upstream = result.returncode == 0 and bool(result.stdout.strip())
+    
+    return remote, has_upstream
+
+
+def sync_with_remote(repo_root: Path, source_branch: str) -> None:
+    """Sync with remote if available, but don't fail if not."""
+    # Switch to source branch first
+    subprocess.run(
+        ["git", "-C", str(repo_root), "switch", "--quiet", source_branch], 
+        check=True
+    )
+    
+    # Now check remote info for the source branch
+    remote, has_upstream = get_remote_info(repo_root, source_branch)
+    
+    if not remote:
+        console.print("[yellow]ℹ️  No git remote configured - working with local repository[/yellow]")
+        return
+    
+    # Try to fetch from remote
+    console.print(f"[dim]Syncing with remote '{remote}'...[/dim]")
+    fetch_result = subprocess.run(
+        ["git", "-C", str(repo_root), "fetch", remote],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    
+    if fetch_result.returncode != 0:
+        console.print(f"[yellow]⚠️  Could not fetch from remote '{remote}' - continuing with local state[/yellow]")
+        # Don't show stderr details unless it's not just a network issue
+        if "Could not read from remote" not in fetch_result.stderr:
+            console.print(f"[dim]   ({fetch_result.stderr.strip()})[/dim]")
+        return
+    
+    # Only pull if the branch has an upstream and fetch succeeded
+    if has_upstream:
+        pull_result = subprocess.run(
+            ["git", "-C", str(repo_root), "pull", "--ff-only", "--quiet"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        
+        if pull_result.returncode != 0:
+            console.print("[yellow]⚠️  Could not pull latest changes - continuing with current state[/yellow]")
+            if "diverged" in pull_result.stderr:
+                console.print("[yellow]   Note: Your branch has diverged from the remote[/yellow]")
+
+
 def check_gitignore(repo_root: Path) -> bool:
-    """Check if .claude-wt/worktrees is in .gitignore"""
-    gitignore_path = repo_root / ".gitignore"
-    if not gitignore_path.exists():
+    """Check if .claude-wt/worktrees is in .gitignore (local or global)"""
+    patterns_to_check = [
+        ".claude-wt/worktrees",
+        ".claude-wt/worktrees/",
+        ".claude-wt/*",
+        ".claude-wt/**",
+        ".claude-wt",  # Also check for the directory itself
+    ]
+    
+    # Helper function to check if patterns exist in a file
+    def check_patterns_in_file(file_path: Path) -> bool:
+        if not file_path.exists():
+            return False
+        try:
+            content = file_path.read_text()
+            lines = [line.strip() for line in content.split("\n")]
+            for line in lines:
+                # Skip comments and empty lines
+                if line and not line.startswith("#"):
+                    if line in patterns_to_check:
+                        return True
+        except (IOError, OSError):
+            # File might not be readable
+            return False
         return False
-
-    gitignore_content = gitignore_path.read_text()
-    # Check for exact match or pattern that would include it
-    lines = [line.strip() for line in gitignore_content.split("\n")]
-
-    for line in lines:
-        if line in [
-            ".claude-wt/worktrees",
-            ".claude-wt/worktrees/",
-            ".claude-wt/*",
-            ".claude-wt/**",
-        ]:
+    
+    # 1. Check local .gitignore
+    local_gitignore = repo_root / ".gitignore"
+    if check_patterns_in_file(local_gitignore):
+        return True
+    
+    # 2. Check global gitignore
+    # First try to get the configured global excludes file
+    try:
+        result = subprocess.run(
+            ["git", "config", "--global", "core.excludesfile"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # Expand ~ and environment variables
+            global_gitignore_path = Path(result.stdout.strip()).expanduser()
+            if check_patterns_in_file(global_gitignore_path):
+                return True
+    except (subprocess.SubprocessError, OSError):
+        # git command might not be available or might fail
+        pass
+    
+    # 3. Check default global gitignore locations if no configured path
+    default_locations = [
+        Path.home() / ".gitignore_global",
+        Path.home() / ".config" / "git" / "ignore",
+    ]
+    
+    for location in default_locations:
+        if check_patterns_in_file(location):
             return True
-
+    
     return False
 
 
@@ -39,6 +175,7 @@ def new(
     query: str = "",
     branch: str = "",
     name: str = "",
+    dangerously_skip_permissions: bool = True,
 ):
     """Create a new worktree and launch Claude.
 
@@ -50,6 +187,8 @@ def new(
         Source branch to create worktree from
     name : str
         Name suffix for the worktree branch
+    dangerously_skip_permissions : bool
+        Skip permission checks in Claude (use with caution)
     """
     # Get repo root
     result = subprocess.run(
@@ -90,19 +229,13 @@ This directory must be added to .gitignore to prevent committing worktree data.
         )
         source_branch = result.stdout.strip()
 
-    # Sync with origin
-    subprocess.run(["git", "-C", str(repo_root), "fetch", "origin"], check=True)
-    subprocess.run(
-        ["git", "-C", str(repo_root), "switch", "--quiet", source_branch], check=True
-    )
-    subprocess.run(
-        ["git", "-C", str(repo_root), "pull", "--ff-only", "--quiet"], check=True
-    )
+    # Sync with remote if available (but don't fail if not)
+    sync_with_remote(repo_root, source_branch)
 
     # Generate worktree branch name
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     suffix = name or timestamp
-    branch_name = f"claude-wt-{suffix}"
+    branch_name = f"cwt-{suffix}"
 
     # Create branch if needed
     try:
@@ -163,6 +296,8 @@ This directory must be added to .gitignore to prevent committing worktree data.
     # Launch Claude
     claude_path = shutil.which("claude") or "/Users/jlowin/.claude/local/claude"
     claude_cmd = [claude_path, "--add-dir", str(repo_root)]
+    if dangerously_skip_permissions:
+        claude_cmd.append("--dangerously-skip-permissions")
     if query:
         claude_cmd.extend(["--", query])
 
@@ -170,13 +305,15 @@ This directory must be added to .gitignore to prevent committing worktree data.
 
 
 @app.command
-def resume(branch_name: str):
+def resume(branch_name: str, dangerously_skip_permissions: bool = True):
     """Resume an existing worktree session.
 
     Parameters
     ----------
     branch_name : str
         Branch name to resume
+    dangerously_skip_permissions : bool
+        Skip permission checks in Claude (use with caution)
     """
     try:
         # Get repo root
@@ -189,7 +326,7 @@ def resume(branch_name: str):
         repo_root = Path(result.stdout.strip())
 
         # Find worktree path using git
-        full_branch_name = f"claude-wt-{branch_name}"
+        full_branch_name = f"cwt-{branch_name}"
         result = subprocess.run(
             ["git", "-C", str(repo_root), "worktree", "list", "--porcelain"],
             capture_output=True,
@@ -226,6 +363,8 @@ def resume(branch_name: str):
         # Launch Claude with --continue to resume conversation
         claude_path = shutil.which("claude") or "/Users/jlowin/.claude/local/claude"
         claude_cmd = [claude_path, "--add-dir", str(repo_root), "--continue"]
+        if dangerously_skip_permissions:
+            claude_cmd.append("--dangerously-skip-permissions")
         subprocess.run(claude_cmd, cwd=wt_path)
 
     except subprocess.CalledProcessError as e:
@@ -276,7 +415,7 @@ def clean(
 
         if branch_name:
             # Clean specific branch
-            full_branch_name = f"claude-wt-{branch_name}"
+            full_branch_name = f"cwt-{branch_name}"
             wt_path = wt_root / full_branch_name
 
             # Remove worktree
@@ -342,7 +481,7 @@ def clean(
                     # Remove claude-wt worktrees
                     for wt in worktrees:
                         branch_name = wt.get("branch", "")
-                        if branch_name.startswith("claude-wt-"):
+                        if branch_name.startswith("cwt-"):
                             try:
                                 subprocess.run(
                                     [
@@ -376,7 +515,7 @@ def clean(
                             str(repo_root),
                             "branch",
                             "--list",
-                            "claude-wt-*",
+                            "cwt-*",
                         ],
                         capture_output=True,
                         text=True,
@@ -410,7 +549,7 @@ def clean(
                                     f"  [red]❌ Failed to delete branch {branch}[/red]"
                                 )
                 except subprocess.CalledProcessError:
-                    console.print("  [yellow]No claude-wt-* branches found[/yellow]")
+                    console.print("  [yellow]No cwt-* branches found[/yellow]")
 
             console.print("[green bold]🧹 Cleanup complete![/green bold]")
 
@@ -459,7 +598,7 @@ def list():
 
         # Filter for claude-wt worktrees
         claude_worktrees = [
-            wt for wt in worktrees if wt.get("branch", "").startswith("claude-wt-")
+            wt for wt in worktrees if wt.get("branch", "").startswith("cwt-")
         ]
 
         if not claude_worktrees:
@@ -476,7 +615,7 @@ def list():
 
         for wt in sorted(claude_worktrees, key=lambda x: x.get("branch", "")):
             branch_name = wt.get("branch", "")
-            suffix = branch_name.replace("claude-wt-", "")
+            suffix = branch_name.replace("cwt-", "")
             wt_path = wt["path"]
 
             # Check if worktree path still exists

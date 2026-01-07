@@ -92,7 +92,7 @@ uvx claude-wt clean --all  # The Marie Kondo approach
 
 Think of it like having multiple parallel universes for your code:
 
-1. **Branch Creation** → Each session gets its own branch (`claude-wt-{timestamp}` or your custom name)
+1. **Branch Creation** → Each session gets its own branch (`cwt-{timestamp}` or your custom name)
 2. **Worktree Setup** → Creates a separate directory in `.claude-wt/worktrees/` so files don't conflict
 3. **Claude Launch** → Starts Claude in the isolated environment with full repo access
 4. **Session Management** → Resume, list, and clean up sessions effortlessly
